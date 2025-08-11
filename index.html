@@ -1,12 +1,443 @@
-<!DOCTYPE html>
-<html lang="pt-br">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Controle de Insumos</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>
+import React, { useEffect, useState, useRef } from "react";
+
+// Single-file React component for a tools/insumos control app
+// Tailwind CSS utility classes assumed available in the host project.
+// Uses localStorage as a lightweight DB so you can open in the browser and test immediately.
+// Features implemented (minimum viable):
+// - Login: operator selection + password. ADM user: Alexandre Pereira (senha: admin)
+// - Registro com campos obrigatórios: codigo, descricao, maquina, quantidade, operador, dataHora
+// - Painel ADM para gerenciar operadores e códigos/descrições
+// - Upload de foto (armazenada como dataURL)
+// - Exportar BD para Excel (.xlsx) via SheetJS (xlsx library expected to be available)
+// - Gráfico de consumo por código (Recharts expected to be available)
+// - Exportar gráfico como PNG (converte SVG para canvas)
+// - Interface baseada em layout limpo, totalmente customizável via Tailwind
+
+// NOTE: To run this component as a standalone app, create a Vite/CRA project, install:
+// npm i xlsx recharts
+// and ensure Tailwind is configured. Then drop this file as App.jsx and run.
+
+// --------------------------- Helper utilities ---------------------------
+const STORAGE_KEY = "controle_insumos_db_v1";
+const DEFAULT_OPERADORES = [
+  "Alexandre Pereira",
+  "Robson",
+  "Ulisses",
+  "Vitor",
+  "Matheus de Campos",
+  "Mario",
+  "Matheus Lisboa",
+  "Vinicius",
+  "Guilherme",
+  "Luciano",
+  "Marcos",
+  "Felipe",
+  "Fabio",
+];
+
+const nowIso = () => new Date().toISOString();
+
+function loadDB() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveDB(db) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+}
+
+function makeInitialDB() {
+  return {
+    operadores: DEFAULT_OPERADORES.map((name, i) => ({ id: `op_${i + 1}`, name, password: name === "Alexandre Pereira" ? "admin" : "1234", isAdmin: name === "Alexandre Pereira" })),
+    codigos: [
+      // sample
+      { id: "C0001", codigo: "C0001", descricao: "Pastilha A", foto: null },
+      { id: "C0002", codigo: "C0002", descricao: "Insert B", foto: null },
+    ],
+    registros: [],
+  };
+}
+
+// --------------------------- Main component ---------------------------
+export default function ControleInsumosApp() {
+  const [db, setDb] = useState(() => loadDB() || makeInitialDB());
+  const [user, setUser] = useState(null); // {id, name, isAdmin}
+  const [selectedOperatorId, setSelectedOperatorId] = useState( db.operadores[0]?.id || null );
+  const [loginPassword, setLoginPassword] = useState("");
+
+  // Form fields
+  const [form, setForm] = useState({ codigo: "", descricao: "", maquina: "", quantidade: 1, operador: "", dataHora: new Date().toISOString(), fotoDataUrl: null });
+
+  // UI state
+  const [view, setView] = useState("app"); // app | adm
+  const chartRef = useRef(null);
+
+  // Persist db whenever it changes
+  useEffect(() => {
+    saveDB(db);
+  }, [db]);
+
+  // update operador field when logged user changes
+  useEffect(() => {
+    if (user) setForm((f) => ({ ...f, operador: user.name }));
+  }, [user]);
+
+  // --------------------------- Auth ---------------------------
+  function handleLogin() {
+    const op = db.operadores.find((o) => o.id === selectedOperatorId);
+    if (!op) return alert("Operador não encontrado");
+    if (op.password !== loginPassword) return alert("Senha incorreta");
+    setUser({ id: op.id, name: op.name, isAdmin: !!op.isAdmin });
+    setLoginPassword("");
+  }
+
+  function logout() {
+    setUser(null);
+  }
+
+  // --------------------------- Registro ---------------------------
+  function validateForm() {
+    const required = ["codigo", "descricao", "maquina", "quantidade", "operador", "dataHora"];
+    for (const k of required) {
+      if (!form[k] && form[k] !== 0) return `${k} é obrigatório`;
+    }
+    return null;
+  }
+
+  function addRegistro(e) {
+    e && e.preventDefault();
+    const err = validateForm();
+    if (err) return alert(err);
+    const reg = {
+      id: `r_${Date.now()}`,
+      codigo: form.codigo,
+      descricao: form.descricao,
+      maquina: form.maquina,
+      quantidade: Number(form.quantidade),
+      operador: form.operador,
+      dataHora: form.dataHora,
+      fotoDataUrl: form.fotoDataUrl || null,
+    };
+    setDb((prev) => ({ ...prev, registros: [reg, ...prev.registros] }));
+    // reset some fields
+    setForm((f) => ({ ...f, codigo: "", descricao: "", quantidade: 1, fotoDataUrl: null }));
+  }
+
+  // --------------------------- ADM functions ---------------------------
+  function addOperador(name, password = "1234", isAdmin = false) {
+    const id = `op_${Date.now()}`;
+    setDb((prev) => ({ ...prev, operadores: [...prev.operadores, { id, name, password, isAdmin }] }));
+  }
+
+  function removeOperador(id) {
+    if (!confirm("Remover operador?")) return;
+    setDb((prev) => ({ ...prev, operadores: prev.operadores.filter((o) => o.id !== id) }));
+  }
+
+  function updateOperador(id, patch) {
+    setDb((prev) => ({ ...prev, operadores: prev.operadores.map((o) => (o.id === id ? { ...o, ...patch } : o)) }));
+  }
+
+  function addCodigo(codigo, descricao) {
+    const exists = db.codigos.find((c) => c.codigo === codigo || c.id === codigo);
+    if (exists) return alert("Código já existe");
+    setDb((prev) => ({ ...prev, codigos: [{ id: codigo, codigo, descricao, foto: null }, ...prev.codigos] }));
+  }
+
+  function uploadFotoForCodigo(id, dataUrl) {
+    setDb((prev) => ({ ...prev, codigos: prev.codigos.map((c) => (c.id === id ? { ...c, foto: dataUrl } : c)) }));
+  }
+
+  // --------------------------- Export to Excel ---------------------------
+  async function exportToExcel() {
+    // This function expects SheetJS (xlsx) to be available globally as XLSX
+    if (typeof window.XLSX === "undefined") return alert("Biblioteca xlsx não encontrada. Instale 'xlsx' e carregue como global ou importe no projeto.");
+    const wb = window.XLSX.utils.book_new();
+    const regs = db.registros.map((r) => ({ Código: r.codigo, Descrição: r.descricao, Máquina: r.maquina, Quantidade: r.quantidade, Operador: r.operador, DataHora: r.dataHora }));
+    const ws = window.XLSX.utils.json_to_sheet(regs);
+    window.XLSX.utils.book_append_sheet(wb, ws, "Registros");
+    // codigos
+    const cs = db.codigos.map((c) => ({ Código: c.codigo, Descrição: c.descricao }));
+    const ws2 = window.XLSX.utils.json_to_sheet(cs);
+    window.XLSX.utils.book_append_sheet(wb, ws2, "Códigos");
+    window.XLSX.writeFile(wb, `controle_insumos_${new Date().toISOString().slice(0,10)}.xlsx`);
+  }
+
+  // --------------------------- Chart export ---------------------------
+  function getConsumptionByCode() {
+    const map = {};
+    db.registros.forEach((r) => {
+      map[r.codigo] = (map[r.codigo] || 0) + Number(r.quantidade);
+    });
+    return Object.entries(map).map(([codigo, total]) => ({ codigo, total }));
+  }
+
+  async function exportChartAsPNG() {
+    // find the SVG inside chartRef and convert to canvas
+    if (!chartRef.current) return alert("Gráfico não encontrado");
+    const svg = chartRef.current.querySelector("svg");
+    if (!svg) return alert("SVG não encontrado dentro do gráfico");
+    const serializer = new XMLSerializer();
+    const svgStr = serializer.serializeToString(svg);
+    const img = new Image();
+    const svgBlob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(svgBlob);
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(img,0,0);
+      URL.revokeObjectURL(url);
+      const a = document.createElement("a");
+      a.download = `grafico_consumo_${new Date().toISOString().slice(0,10)}.png`;
+      a.href = canvas.toDataURL("image/png");
+      a.click();
+    };
+    img.src = url;
+  }
+
+  // --------------------------- Helpers for file upload (foto) ---------------------------
+  function handleFotoUploadFile(file, onComplete) {
+    const reader = new FileReader();
+    reader.onload = (ev) => onComplete(ev.target.result);
+    reader.readAsDataURL(file);
+  }
+
+  // --------------------------- Small components ---------------------------
+  function LoginPanel() {
+    return (
+      <div className="max-w-md mx-auto bg-white p-6 rounded-2xl shadow-md">
+        <h2 className="text-xl font-semibold mb-4">Login - Selecione o operador</h2>
+        <div className="mb-3">
+          <label className="block text-sm">Operador</label>
+          <select className="w-full border rounded p-2" value={selectedOperatorId} onChange={(e) => setSelectedOperatorId(e.target.value)}>
+            {db.operadores.map((o) => (
+              <option key={o.id} value={o.id}>{o.name}</option>
+            ))}
+          </select>
+        </div>
+        <div className="mb-3">
+          <label className="block text-sm">Senha</label>
+          <input type="password" className="w-full border rounded p-2" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} />
+        </div>
+        <div className="flex gap-2">
+          <button className="px-4 py-2 bg-blue-600 text-white rounded" onClick={handleLogin}>Entrar</button>
+          <button className="px-4 py-2 border rounded" onClick={() => { setSelectedOperatorId(db.operadores[0]?.id || null); setLoginPassword(""); }}>Cancelar</button>
+        </div>
+      </div>
+    );
+  }
+
+  function RegistroForm() {
+    return (
+      <form onSubmit={addRegistro} className="bg-white p-4 rounded-2xl shadow-md">
+        <h3 className="text-lg font-semibold mb-3">Registrar uso / saída de insumo</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-sm">Código</label>
+            <input value={form.codigo} onChange={(e) => setForm({ ...form, codigo: e.target.value })} className="w-full border rounded p-2" />
+          </div>
+          <div>
+            <label className="block text-sm">Descrição</label>
+            <input value={form.descricao} onChange={(e) => setForm({ ...form, descricao: e.target.value })} className="w-full border rounded p-2" />
+          </div>
+          <div>
+            <label className="block text-sm">Máquina</label>
+            <input value={form.maquina} onChange={(e) => setForm({ ...form, maquina: e.target.value })} className="w-full border rounded p-2" />
+          </div>
+          <div>
+            <label className="block text-sm">Quantidade</label>
+            <input type="number" min={1} value={form.quantidade} onChange={(e) => setForm({ ...form, quantidade: Number(e.target.value) })} className="w-full border rounded p-2" />
+          </div>
+          <div>
+            <label className="block text-sm">Operador</label>
+            <input value={form.operador} readOnly className="w-full border rounded p-2 bg-gray-100" />
+          </div>
+          <div>
+            <label className="block text-sm">Data e hora</label>
+            <input type="datetime-local" value={form.dataHora.slice(0,16)} onChange={(e)=> setForm({ ...form, dataHora: new Date(e.target.value).toISOString() })} className="w-full border rounded p-2" />
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-sm">Foto (opcional)</label>
+            <input type="file" accept="image/*" onChange={(e)=> { const f = e.target.files[0]; if (f) handleFotoUploadFile(f, (dataUrl)=> setForm({ ...form, fotoDataUrl: dataUrl })); }} className="w-full" />
+            {form.fotoDataUrl && <img src={form.fotoDataUrl} alt="foto" className="mt-2 max-h-40" />}
+          </div>
+        </div>
+        <div className="mt-3 flex gap-2">
+          <button type="submit" className="px-4 py-2 bg-green-600 text-white rounded">Registrar</button>
+          <button type="button" className="px-4 py-2 border rounded" onClick={()=> setForm({ codigo: "", descricao: "", maquina: "", quantidade:1, operador: user?.name || "", dataHora: new Date().toISOString(), fotoDataUrl: null })}>Limpar</button>
+        </div>
+      </form>
+    );
+  }
+
+  function RegistrosTable() {
+    return (
+      <div className="bg-white p-4 rounded-2xl shadow-md overflow-auto">
+        <h3 className="text-lg font-semibold mb-3">Últimos registros</h3>
+        <table className="w-full text-sm">
+          <thead className="text-left">
+            <tr>
+              <th className="p-2">Data</th>
+              <th className="p-2">Código</th>
+              <th className="p-2">Descrição</th>
+              <th className="p-2">Máquina</th>
+              <th className="p-2">Qtde</th>
+              <th className="p-2">Operador</th>
+              <th className="p-2">Foto</th>
+            </tr>
+          </thead>
+          <tbody>
+            {db.registros.map((r) => (
+              <tr key={r.id} className="border-t">
+                <td className="p-2 align-top">{new Date(r.dataHora).toLocaleString()}</td>
+                <td className="p-2 align-top">{r.codigo}</td>
+                <td className="p-2 align-top">{r.descricao}</td>
+                <td className="p-2 align-top">{r.maquina}</td>
+                <td className="p-2 align-top">{r.quantidade}</td>
+                <td className="p-2 align-top">{r.operador}</td>
+                <td className="p-2 align-top">{r.fotoDataUrl ? <img src={r.fotoDataUrl} alt="f" className="h-14" /> : "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  function AdmPanel() {
+    const [newOpName, setNewOpName] = useState("");
+    const [newOpPass, setNewOpPass] = useState("");
+    const [newCodigo, setNewCodigo] = useState("");
+    const [newDesc, setNewDesc] = useState("");
+
+    return (
+      <div className="space-y-4">
+        <div className="bg-white p-4 rounded-2xl shadow-md">
+          <h3 className="text-lg font-semibold mb-2">Operadores</h3>
+          <div className="grid gap-2">
+            {db.operadores.map((o) => (
+              <div key={o.id} className="flex items-center justify-between border rounded p-2">
+                <div>
+                  <div className="font-medium">{o.name} {o.isAdmin && <span className="text-xs text-yellow-600">(ADM)</span>}</div>
+                  <div className="text-xs text-gray-600">Senha: {o.password}</div>
+                </div>
+                <div className="flex gap-2">
+                  <button className="px-2 py-1 border rounded" onClick={() => { const newPass = prompt("Nova senha para " + o.name, o.password); if (newPass !== null) updateOperador(o.id, { password: newPass }); }}>Alterar senha</button>
+                  {!o.isAdmin && <button className="px-2 py-1 border rounded" onClick={() => removeOperador(o.id)}>Remover</button>}
+                </div>
+              </div>
+            ))}
+            <div className="flex gap-2">
+              <input placeholder="Nome novo operador" value={newOpName} onChange={(e)=> setNewOpName(e.target.value)} className="flex-1 border rounded p-2" />
+              <input placeholder="Senha" value={newOpPass} onChange={(e)=> setNewOpPass(e.target.value)} className="w-36 border rounded p-2" />
+              <button className="px-3 py-2 bg-blue-600 text-white rounded" onClick={()=> { if (!newOpName) return alert('Digite nome'); addOperador(newOpName, newOpPass || '1234'); setNewOpName(''); setNewOpPass(''); }}>Adicionar</button>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white p-4 rounded-2xl shadow-md">
+          <h3 className="text-lg font-semibold mb-2">Códigos / Descrições</h3>
+          <div className="space-y-2">
+            {db.codigos.map((c) => (
+              <div key={c.id} className="flex items-center gap-3 border rounded p-2">
+                <div className="w-28 text-sm font-mono">{c.codigo}</div>
+                <div className="flex-1">{c.descricao}</div>
+                <div className="w-28 text-right">
+                  <input type="file" accept="image/*" onChange={(e)=> { const f = e.target.files[0]; if (f) handleFotoUploadFile(f, (d)=> uploadFotoForCodigo(c.id, d)); }} />
+                </div>
+              </div>
+            ))}
+            <div className="flex gap-2 mt-2">
+              <input placeholder="Código" value={newCodigo} onChange={(e)=> setNewCodigo(e.target.value)} className="border rounded p-2" />
+              <input placeholder="Descrição" value={newDesc} onChange={(e)=> setNewDesc(e.target.value)} className="flex-1 border rounded p-2" />
+              <button className="px-3 py-2 bg-green-600 text-white rounded" onClick={()=> { if (!newCodigo || !newDesc) return alert('preencha'); addCodigo(newCodigo, newDesc); setNewCodigo(''); setNewDesc(''); }}>Adicionar</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    );
+  }
+
+  // --------------------------- Render ---------------------------
+  return (
+    <div className="min-h-screen bg-gray-100 p-6">
+      <div className="max-w-6xl mx-auto space-y-6">
+        <header className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">Controle de Insumos - Teste</h1>
+            <div className="text-sm text-gray-600">Versão de demonstração — armazenando dados no seu navegador</div>
+          </div>
+          <div className="flex items-center gap-3">
+            {user ? (
+              <>
+                <div className="text-sm">{user.name} {user.isAdmin && <span className="text-xs text-yellow-600">(ADM)</span>}</div>
+                <button className="px-3 py-2 border rounded" onClick={()=> setView(view === 'adm' ? 'app' : 'adm')}>{view === 'adm' ? 'Voltar' : 'Painel ADM'}</button>
+                <button className="px-3 py-2 border rounded" onClick={logout}>Sair</button>
+              </>
+            ) : (
+              <button className="px-3 py-2 bg-blue-600 text-white rounded" onClick={()=> { setUser(null); }}>Entrar</button>
+            )}
+          </div>
+        </header>
+
+        {!user ? <LoginPanel /> : (
+          <main className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-4">
+              {view === 'adm' ? <AdmPanel /> : (
+                <>
+                  <RegistroForm />
+                  <RegistrosTable />
+                </>
+              )}
+            </div>
+            <aside className="space-y-4">
+              <div className="bg-white p-4 rounded-2xl shadow-md">
+                <h3 className="font-semibold mb-2">Ações</h3>
+                <div className="flex flex-col gap-2">
+                  <button className="px-3 py-2 border rounded" onClick={exportToExcel}>Exportar para Excel (.xlsx)</button>
+                  <button className="px-3 py-2 border rounded" onClick={()=> { navigator.clipboard.writeText(JSON.stringify(db)).then(()=> alert('DB copiado para a área de transferência')) }}>Copiar JSON do BD</button>
+                  <button className="px-3 py-2 border rounded" onClick={()=> { if (confirm('Limpar todos os dados do banco de teste?')) { const base = makeInitialDB(); setDb(base); alert('Banco resetado'); } }}>Resetar banco (test)</button>
+                </div>
+              </div>
+
+              <div className="bg-white p-4 rounded-2xl shadow-md" ref={chartRef}>
+                <h3 className="font-semibold mb-2">Gráfico de consumo por código</h3>
+                <div style={{ width: '100%', height: 220 }}>
+                  {/* Simple bar chart using Recharts - ensure recharts is installed/imported in host project */}
+                  {typeof window !== 'undefined' && window.Recharts ? (
+                    <window.Recharts.ResponsiveContainer width="100%" height={200}>
+                      <window.Recharts.BarChart data={getConsumptionByCode()}>
+                        <window.Recharts.XAxis dataKey="codigo" />
+                        <window.Recharts.YAxis />
+                        <window.Recharts.Tooltip />
+                        <window.Recharts.Bar dataKey="total" />
+                      </window.Recharts.BarChart>
+                    </window.Recharts.ResponsiveContainer>
+                  ) : (
+                    <div className="text-sm text-gray-500">Para visualizar o gráfico, instale 'recharts' e exponha como window.Recharts (ou importe no projeto).</div>
+                  )}
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <button className="px-3 py-2 border rounded" onClick={exportChartAsPNG}>Exportar gráfico (PNG)</button>
+                </div>
+              </div>
+
+            </aside>
+          </main>
+        )}
+
+        <footer className="text-xs text-gray-500">Dica: este é um app de demonstração — para colocar online eu posso gerar os arquivos prontos e instruções de deploy (Vercel/Netlify) ou publicar eu mesmo se você me fornecer acesso. Quer que eu publique em um link público agora?</footer>
+      </div>
+    </div>
+  );
+}
