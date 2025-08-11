@@ -1,0 +1,16 @@
+{
+  "name": "controle-insumos",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "recharts": "^2.7.0",
+    "xlsx": "^0.18.5"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  }
+}
